@@ -177,9 +177,12 @@ class UestraApiClient:
                 effective_dt = self._parse_iso_datetime(effective_time)
 
                 # Vergangene Abfahrten ignorieren
-                if effective_dt <= datetime.now(effective_dt.tzinfo):
-                    continue
-
+                #if effective_dt <= datetime.now(effective_dt.tzinfo):
+                #    continue
+                from datetime import timezone
+                now_utc = datetime.now(timezone.utc)
+                if effective_dt <= now_utc:
+                continue
                 delay_minutes = self._calculate_delay_minutes(
                     planned_time=planned_time,
                     estimated_time=estimated_time,
