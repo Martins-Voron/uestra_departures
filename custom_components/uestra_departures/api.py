@@ -1,285 +1,95 @@
-from __future__ import annotations
-
-from dataclasses import dataclass
-from datetime import datetime
 import logging
-from typing import Any
-
-from aiohttp import ClientSession
+from datetime import datetime, timezone
+import aiohttp
 
 _LOGGER = logging.getLogger(__name__)
 
-UESTRA_DEPARTURES_API_URL = "https://abfahrten.uestra.de/proxy2/efa/XML_DM_REQUEST"
-DEFAULT_TIMEOUT = 20
+BASE_URL = "https://abfahrten.uestra.de/proxy2/efa/XML_DM_REQUEST"
 
 
-@dataclass
-class Departure:
-    line: str
-    destination: str
-    scheduled_time: str
-    realtime_time: str | None
-    delay_minutes: int | None
-    transport_mode: str
+class UestraAPI:
+    def __init__(self, hass, stop_id, transport_mode):
+        self._hass = hass
+        self._stop_id = stop_id
+        self._transport_mode = transport_mode
 
-
-@dataclass
-class Disruption:
-    title: str
-    summary: str
-    url: str | None
-    affected_lines: list[str]
-
-
-@dataclass
-class UestraData:
-    stop_name: str
-    departures: list[Departure]
-    disruptions: list[Disruption]
-    updated_at: str
-
-
-class UestraApiClient:
-    def __init__(self, session: ClientSession) -> None:
-        self._session = session
-
-    async def async_fetch_data(
-        self,
-        stop_name: str,
-        stop_id: str,
-        transport_mode: str,
-        departure_count: int,
-        line_filter: list[str] | None = None,
-    ) -> UestraData:
-        raw = await self._async_fetch_departure_payload(stop_id=stop_id)
-
-        departures = self._parse_departures(
-            payload=raw,
-            transport_mode=transport_mode,
-            departure_count=departure_count,
-            line_filter=line_filter or [],
-        )
-
-        disruptions = self._parse_disruptions(
-            payload=raw,
-            transport_mode=transport_mode,
-            line_filter=line_filter or [],
-        )
-
-        return UestraData(
-            stop_name=raw.get("stop", stop_name),
-            departures=departures,
-            disruptions=disruptions,
-            updated_at=datetime.now().isoformat(),
-        )
-
-    async def _async_fetch_departure_payload(self, stop_id: str) -> dict[str, Any]:
+    async def fetch_departures(self):
         params = {
-            "canChangeMOT": "0",
-            "coordOutputFormat": "WGS84[dd.ddddd]",
-            "deleteAssignedStops_dm": "1",
-            "depSequence": "30",
-            "depType": "stopEvents",
-            "doNotSearchForStops": "1",
-            "genMaps": "0",
-            "imparedOptionsActive": "1",
-            "inclMOT_1": "true",
-            "inclMOT_2": "true",
-            "inclMOT_3": "true",
-            "inclMOT_4": "true",
-            "inclMOT_5": "true",
-            "inclMOT_6": "true",
-            "inclMOT_7": "true",
-            "inclMOT_8": "true",
-            "inclMOT_9": "true",
-            "inclMOT_10": "true",
-            "inclMOT_11": "true",
-            "inclMOT_13": "true",
-            "inclMOT_14": "true",
-            "inclMOT_15": "true",
-            "inclMOT_16": "true",
-            "inclMOT_17": "true",
-            "inclMOT_18": "true",
-            "inclMOT_19": "true",
-            "includeCompleteStopSeq": "1",
-            "includedMeans": "checkbox",
-            "itOptionsActive": "1",
-            "itdDateTimeDepArr": "dep",
-            "language": "de",
-            "locationServerActive": "1",
-            "maxTimeLoop": "1",
-            "mergeDep": "1",
-            "mode": "direct",
-            "outputFormat": "rapidJSON",
-            "ptOptionsActive": "1",
-            "serverInfo": "1",
-            "sl3plusDMMacro": "1",
+            "name_dm": self._stop_id,
             "type_dm": "any",
-            "useAllStops": "1",
-            "useProxFootSearch": "0",
-            "useRealtime": "1",
-            "version": "10.5.17.3",
-            "c": "4",
-            "name_dm": stop_id,
+            "mode": "direct",
+            "useRealtime": 1,
+            "outputFormat": "rapidJSON",
+            "depType": "stopEvents",
+            "depSequence": 30,
         }
 
-        headers = {
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"https://abfahrten.uestra.de/?h={stop_id}",
-        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(BASE_URL, params=params) as response:
+                    if response.status != 200:
+                        _LOGGER.error("HTTP Fehler: %s", response.status)
+                        return []
 
-        async with self._session.get(
-            UESTRA_DEPARTURES_API_URL,
-            params=params,
-            headers=headers,
-            timeout=DEFAULT_TIMEOUT,
-        ) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
+                    data = await response.json()
+                    return self._parse_departures(data)
 
-        if not isinstance(data, dict):
-            raise ValueError("Unexpected API response format")
+        except Exception as e:
+            _LOGGER.exception("Fehler beim Abrufen der ÜSTRA-Daten: %s", e)
+            return []
 
-        return data
+    def _parse_departures(self, data):
+        departures = []
 
-    def _parse_departures(
-        self,
-        payload: dict[str, Any],
-        transport_mode: str,
-        departure_count: int,
-        line_filter: list[str],
-    ) -> list[Departure]:
-        raw_departures = payload.get("departures", [])
-        parsed: list[Departure] = []
+        try:
+            now_utc = datetime.now(timezone.utc)
 
-        for dep in raw_departures:
-            line_name = str(dep.get("line", "")).strip()
-            line_number = str(dep.get("number", "")).strip()
-            destination = str(dep.get("destination", "")).strip()
+            for dep in data.get("departureList", []):
+                line = dep.get("servingLine", {}).get("number")
+                destination = dep.get("servingLine", {}).get("direction")
 
-            detected_mode = self._detect_transport_mode(line_name)
+                # Zeit holen
+                realtime = dep.get("realDateTime") or dep.get("dateTime")
 
-            if not self._matches_transport_mode(detected_mode, transport_mode):
-                continue
-
-            if line_filter and line_number not in line_filter and line_name not in line_filter:
-                continue
-
-            for event in dep.get("events", []):
-                planned_time = event.get("plannedTime")
-                estimated_time = event.get("estimated_time")
-
-                if not planned_time:
+                if not realtime:
                     continue
 
-                effective_time = estimated_time or planned_time
-                effective_dt = self._parse_iso_datetime(effective_time)
-
-                # Vergangene Abfahrten ignorieren
-                #if effective_dt <= datetime.now(effective_dt.tzinfo):
-                #    continue
-                from datetime import timezone
-                now_utc = datetime.now(timezone.utc)
-                if effective_dt <= now_utc:
-                continue
-                delay_minutes = self._calculate_delay_minutes(
-                    planned_time=planned_time,
-                    estimated_time=estimated_time,
-                )
-
-                parsed.append(
-                    Departure(
-                        line=line_number or line_name,
-                        destination=destination,
-                        scheduled_time=planned_time,
-                        realtime_time=estimated_time,
-                        delay_minutes=delay_minutes,
-                        transport_mode=detected_mode,
+                try:
+                    dt = datetime(
+                        int(realtime["year"]),
+                        int(realtime["month"]),
+                        int(realtime["day"]),
+                        int(realtime["hour"]),
+                        int(realtime["minute"]),
+                        tzinfo=timezone.utc,
                     )
-                )
-
-        parsed.sort(
-            key=lambda d: self._parse_iso_datetime(d.realtime_time or d.scheduled_time)
-        )
-
-        return parsed[:departure_count]
-
-    def _parse_disruptions(
-        self,
-        payload: dict[str, Any],
-        transport_mode: str,
-        line_filter: list[str],
-    ) -> list[Disruption]:
-        raw_departures = payload.get("departures", [])
-        disruptions: list[Disruption] = []
-        seen_ids: set[str] = set()
-
-        for dep in raw_departures:
-            line_name = str(dep.get("line", "")).strip()
-            line_number = str(dep.get("number", "")).strip()
-
-            detected_mode = self._detect_transport_mode(line_name)
-
-            if not self._matches_transport_mode(detected_mode, transport_mode):
-                continue
-
-            if line_filter and line_number not in line_filter and line_name not in line_filter:
-                continue
-
-            for info in dep.get("infos", []):
-                info_id = str(info.get("id", "")).strip()
-                if info_id and info_id in seen_ids:
+                except Exception as e:
+                    _LOGGER.debug("Zeit parsing fehlgeschlagen: %s", e)
                     continue
 
-                title = str(info.get("titel", "")).strip()
-                content = str(info.get("content", "")).strip()
-
-                if not title and not content:
+                # 🔥 WICHTIG: UTC Vergleich
+                if dt <= now_utc:
                     continue
 
-                disruptions.append(
-                    Disruption(
-                        title=title or f"Meldung Linie {line_number or line_name}",
-                        summary=content,
-                        url=None,
-                        affected_lines=[line_number or line_name],
-                    )
+                delay = dep.get("delay", 0)
+
+                departures.append(
+                    {
+                        "line": line,
+                        "destination": destination,
+                        "scheduled_time": dt.isoformat(),
+                        "realtime_time": dt.isoformat(),
+                        "delay_minutes": delay,
+                        "transport_mode": self._transport_mode,
+                    }
                 )
 
-                if info_id:
-                    seen_ids.add(info_id)
+            # Sortieren nach Zeit
+            departures.sort(key=lambda x: x["realtime_time"])
 
-        return disruptions
+            # Nur nächste 3
+            return departures[:3]
 
-    @staticmethod
-    def _detect_transport_mode(line_name: str) -> str:
-        line_name_lower = line_name.lower()
-        if "stadtbahn" in line_name_lower:
-            return "stadtbahn"
-        if "bus" in line_name_lower:
-            return "bus"
-        return "all"
-
-    @staticmethod
-    def _matches_transport_mode(detected_mode: str, wanted_mode: str) -> bool:
-        if wanted_mode == "all":
-            return True
-        return detected_mode == wanted_mode
-
-    @staticmethod
-    def _parse_iso_datetime(value: str) -> datetime:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-
-    def _calculate_delay_minutes(
-        self,
-        planned_time: str,
-        estimated_time: str | None,
-    ) -> int | None:
-        if not estimated_time:
-            return None
-
-        planned = self._parse_iso_datetime(planned_time)
-        estimated = self._parse_iso_datetime(estimated_time)
-        delta = estimated - planned
-        return int(delta.total_seconds() // 60)
+        except Exception as e:
+            _LOGGER.exception("Fehler beim Parsen der Daten: %s", e)
+            return []
