@@ -1,0 +1,17 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add ÜSTRA Departures",
+        "description": "Configure stop and transport mode.",
+        "data": {
+          "stop_name": "Stop name",
+          "stop_id": "Stop ID",
+          "transport_mode": "Transport mode",
+          "departure_count": "Number of departures",
+          "line_filter": "Optional line filter (comma-separated)"
+        }
+      }
+    }
+  }
+}

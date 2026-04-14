@@ -1,0 +1,17 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "ÜSTRA Abfahrten hinzufügen",
+        "description": "Haltestelle und Verkehrsmittel konfigurieren.",
+        "data": {
+          "stop_name": "Haltestelle",
+          "stop_id": "Haltestellen-ID",
+          "transport_mode": "Verkehrsmittel",
+          "departure_count": "Anzahl Abfahrten",
+          "line_filter": "Optionaler Linienfilter (kommagetrennt)"
+        }
+      }
+    }
+  }
+}
