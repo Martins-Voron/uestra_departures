@@ -173,6 +173,13 @@ class UestraApiClient:
                 if not planned_time:
                     continue
 
+                effective_time = estimated_time or planned_time
+                effective_dt = self._parse_iso_datetime(effective_time)
+
+                # Vergangene Abfahrten ignorieren
+                if effective_dt <= datetime.now(effective_dt.tzinfo):
+                    continue
+
                 delay_minutes = self._calculate_delay_minutes(
                     planned_time=planned_time,
                     estimated_time=estimated_time,
