@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -18,6 +19,8 @@ from .const import (
     DOMAIN,
 )
 
+_LOGGER = logging.getLogger(__name__)
+
 
 class UestraDataUpdateCoordinator(DataUpdateCoordinator[UestraData]):
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -27,7 +30,7 @@ class UestraDataUpdateCoordinator(DataUpdateCoordinator[UestraData]):
 
         super().__init__(
             hass,
-            logger=None,
+            logger=_LOGGER,
             name=DOMAIN,
             update_interval=timedelta(seconds=COORDINATOR_UPDATE_INTERVAL_SECONDS),
         )
