@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 from typing import Any
 
@@ -11,6 +11,10 @@ _LOGGER = logging.getLogger(__name__)
 
 UESTRA_DEPARTURES_API_URL = "https://abfahrten.uestra.de/proxy2/efa/XML_DM_REQUEST"
 DEFAULT_TIMEOUT = 20
+
+# Abfahrten, die maximal 60 Sekunden in der Vergangenheit liegen,
+# werden noch toleriert. Alles ältere wird verworfen.
+PAST_DEPARTURE_GRACE_SECONDS = 60
 
 
 @dataclass
@@ -77,18 +81,58 @@ class UestraApiClient:
 
     async def _async_fetch_departure_payload(self, stop_id: str) -> dict[str, Any]:
         params = {
-            "name_dm": stop_id,
-            "type_dm": "any",
-            "mode": "direct",
-            "useRealtime": "1",
-            "outputFormat": "rapidJSON",
-            "depType": "stopEvents",
+            "canChangeMOT": "0",
+            "coordOutputFormat": "WGS84[dd.ddddd]",
+            "deleteAssignedStops_dm": "1",
             "depSequence": "30",
+            "depType": "stopEvents",
+            "doNotSearchForStops": "1",
+            "genMaps": "0",
+            "imparedOptionsActive": "1",
+            "inclMOT_1": "true",
+            "inclMOT_2": "true",
+            "inclMOT_3": "true",
+            "inclMOT_4": "true",
+            "inclMOT_5": "true",
+            "inclMOT_6": "true",
+            "inclMOT_7": "true",
+            "inclMOT_8": "true",
+            "inclMOT_9": "true",
+            "inclMOT_10": "true",
+            "inclMOT_11": "true",
+            "inclMOT_13": "true",
+            "inclMOT_14": "true",
+            "inclMOT_15": "true",
+            "inclMOT_16": "true",
+            "inclMOT_17": "true",
+            "inclMOT_18": "true",
+            "inclMOT_19": "true",
+            "includeCompleteStopSeq": "1",
+            "includedMeans": "checkbox",
+            "itOptionsActive": "1",
+            "itdDateTimeDepArr": "dep",
+            "language": "de",
+            "locationServerActive": "1",
+            "maxTimeLoop": "1",
+            "mergeDep": "1",
+            "mode": "direct",
+            "outputFormat": "rapidJSON",
+            "ptOptionsActive": "1",
+            "serverInfo": "1",
+            "sl3plusDMMacro": "1",
+            "type_dm": "any",
+            "useAllStops": "1",
+            "useProxFootSearch": "0",
+            "useRealtime": "1",
+            "version": "10.5.17.3",
+            "c": "4",
+            "name_dm": stop_id,
         }
 
         headers = {
-            "Accept": "application/json",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
             "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"https://abfahrten.uestra.de/?h={stop_id}",
         }
 
         async with self._session.get(
@@ -99,6 +143,9 @@ class UestraApiClient:
         ) as resp:
             resp.raise_for_status()
             data = await resp.json()
+
+        if not isinstance(data, dict):
+            raise ValueError("Unexpected API response format")
 
         return data
 
@@ -113,7 +160,7 @@ class UestraApiClient:
         parsed: list[Departure] = []
 
         now_utc = datetime.now(timezone.utc)
-        now_local = datetime.now().astimezone()
+        cutoff_utc = now_utc - timedelta(seconds=PAST_DEPARTURE_GRACE_SECONDS)
 
         for dep in raw_departures:
             line_name = str(dep.get("line", "")).strip()
@@ -138,13 +185,16 @@ class UestraApiClient:
                 effective_time = estimated_time or planned_time
                 effective_dt = self._parse_iso_datetime(effective_time)
 
-                # Nur zukünftige
-                if effective_dt <= now_utc:
+                # Nur relevante Abfahrten:
+                # maximal 60 Sekunden in der Vergangenheit tolerieren, alles ältere verwerfen.
+                if effective_dt < cutoff_utc:
                     continue
 
-                # 🔥 Neue Features
                 local_dt = effective_dt.astimezone()
-                in_minutes = int((effective_dt - now_utc).total_seconds() // 60)
+                in_minutes = max(
+                    int((effective_dt - now_utc).total_seconds() // 60),
+                    0,
+                )
 
                 delay_minutes = self._calculate_delay_minutes(
                     planned_time=planned_time,
@@ -164,10 +214,12 @@ class UestraApiClient:
                     )
                 )
 
+        # 1) Sortierung
         parsed.sort(
             key=lambda d: self._parse_iso_datetime(d.realtime_time or d.scheduled_time)
         )
 
+        # 2) Begrenzung auf die nächsten N relevanten Abfahrten
         return parsed[:departure_count]
 
     def _parse_disruptions(
@@ -176,7 +228,46 @@ class UestraApiClient:
         transport_mode: str,
         line_filter: list[str],
     ) -> list[Disruption]:
-        return []
+        raw_departures = payload.get("departures", [])
+        disruptions: list[Disruption] = []
+        seen_ids: set[str] = set()
+
+        for dep in raw_departures:
+            line_name = str(dep.get("line", "")).strip()
+            line_number = str(dep.get("number", "")).strip()
+
+            detected_mode = self._detect_transport_mode(line_name)
+
+            if not self._matches_transport_mode(detected_mode, transport_mode):
+                continue
+
+            if line_filter and line_number not in line_filter and line_name not in line_filter:
+                continue
+
+            for info in dep.get("infos", []):
+                info_id = str(info.get("id", "")).strip()
+                if info_id and info_id in seen_ids:
+                    continue
+
+                title = str(info.get("titel", "")).strip()
+                content = str(info.get("content", "")).strip()
+
+                if not title and not content:
+                    continue
+
+                disruptions.append(
+                    Disruption(
+                        title=title or f"Meldung Linie {line_number or line_name}",
+                        summary=content,
+                        url=None,
+                        affected_lines=[line_number or line_name],
+                    )
+                )
+
+                if info_id:
+                    seen_ids.add(info_id)
+
+        return disruptions
 
     @staticmethod
     def _detect_transport_mode(line_name: str) -> str:

@@ -52,7 +52,11 @@ class UestraDeparturesSensor(BaseUestraSensor):
 
     @property
     def native_value(self) -> str:
-        return f"{len(self.coordinator.data.departures)} departures"
+        if not self.coordinator.data.departures:
+            return "no departures"
+
+        next_dep = self.coordinator.data.departures[0]
+        return f"{next_dep.line} → {next_dep.destination}"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -67,6 +71,8 @@ class UestraDeparturesSensor(BaseUestraSensor):
                     "realtime_time": dep.realtime_time,
                     "delay_minutes": dep.delay_minutes,
                     "transport_mode": dep.transport_mode,
+                    "local_time": dep.local_time,
+                    "in_minutes": dep.in_minutes,
                 }
                 for dep in self.coordinator.data.departures
             ],
